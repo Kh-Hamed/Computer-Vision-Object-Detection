@@ -52,7 +52,7 @@ from utils.general import (LOGGER, Profile, check_file, check_img_size, check_im
 from utils.torch_utils import select_device, smart_inference_mode
 
 
-@smart_inference_mode()
+# @smart_inference_mode()
 def run(
         weights=ROOT / 'yolov5s.pt',  # model path or triton URL
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
@@ -250,7 +250,7 @@ def parse_opt():
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--view-img', action='store_true', help='show results')
-    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    parser.add_argument('--save-txt', default=True, action='store_true', help='save results to *.txt')
     parser.add_argument('--save-csv', action='store_true', help='save results in CSV format')
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
@@ -270,6 +270,7 @@ def parse_opt():
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
     opt = parser.parse_args()
+    opt.classes = [2, 3, 5, 6, 7]
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
     return opt

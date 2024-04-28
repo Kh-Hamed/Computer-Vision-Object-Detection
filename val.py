@@ -45,6 +45,204 @@ from utils.general import (LOGGER, TQDM_BAR_FORMAT, Profile, check_dataset, chec
 from utils.metrics import ConfusionMatrix, ap_per_class, box_iou
 from utils.plots import output_to_target, plot_images, plot_val_study
 from utils.torch_utils import select_device, smart_inference_mode
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import torchvision
+
+import torch
+
+from deep_sort_realtime.deepsort_tracker import DeepSort
+import cv2
+object_tracker = DeepSort(max_age=10,
+    n_init=3,
+    nms_max_overlap=1.0,
+    max_cosine_distance=0.2,
+    nn_budget=None,
+    override_track_class=None,
+    embedder="clip_ViT-B/32",
+    half=False,
+    bgr=False,
+    embedder_gpu=True,
+    embedder_model_name=None,
+    embedder_wts=None,
+    polygon=False,
+    today=None)
+
+def calculate_iou(box1, box2):
+    # box1 and box2 should be in the format (x1, y1, x2, y2)
+
+    # Calculate the intersection rectangle
+    intersection_x1 = torch.max(box1[0], box2[0])
+    intersection_y1 = torch.max(box1[1], box2[1])
+    intersection_x2 = torch.min(box1[2], box2[2])
+    intersection_y2 = torch.min(box1[3], box2[3])
+
+    # Calculate the area of intersection rectangle
+    intersection_area = torch.clamp(intersection_x2 - intersection_x1, min=0) * torch.clamp(intersection_y2 - intersection_y1, min=0)
+
+    # Calculate the area of both bounding boxes
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+    # Calculate IoU
+    iou = intersection_area / (box1_area + box2_area - intersection_area + 1e-5)  # Adding a small epsilon to avoid division by zero
+
+    return iou
+
+# Example usage
+box1 = torch.tensor([50, 50, 150, 150])
+box2 = torch.tensor([100, 100, 200, 200])
+iou = calculate_iou(box1, box2)
+print("IoU:", iou.item())
+
+
+def nms_all_classes(boxes, scores, iou_threshold=0.9, ind=False):
+    # Convert boxes and scores to PyTorch tensors
+    boxes_tensor = torch.tensor(boxes)
+    scores_tensor = torch.tensor(scores)
+    # if ind:
+
+    #     iou = calculate_iou(boxes_tensor[5], boxes_tensor[8])
+
+    # Combine boxes and scores into a single tensor
+    detections = torch.cat((boxes_tensor, scores_tensor.view(-1, 1)), dim=1)
+
+    # Apply NMS using torchvision.ops.nms
+    keep_indices = torchvision.ops.nms(detections[:, :4], detections[:, 4], 0.80)
+
+    # Initialize mask to keep all boxes
+    keep_mask = torch.zeros_like(scores_tensor, dtype=torch.bool)
+
+    # Update the mask based on the indices returned by NMS
+    keep_mask[keep_indices] = True
+
+    return keep_indices
+
+def plot_image_with_bboxes(image_path, yolo_predictions_path, output_path):
+    # Load the image
+    image = cv2.imread(str(image_path))
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image_height, image_width, _ = image.shape  # Get image dimensions
+
+    # Read YOLO predictions from the txt file
+    with open(yolo_predictions_path, 'r') as file:
+        yolo_predictions = [line.strip().split() for line in file]
+
+    # Define classes and colors
+    classes = {0: 'car', 1: 'van', 2: 'misc', 3: 'truck', 4: 'tram'}
+    colors = {0: 'r', 1: 'g', 2: 'b', 3: 'y', 4: 'c'}
+
+    # Plot the image
+    plt.figure(figsize=(10, 8))
+    plt.imshow(image_rgb)
+
+    # Parse YOLO predictions and draw bounding boxes
+    for pred in yolo_predictions:
+        class_idx = int(pred[0])
+        x, y, w, h = map(float, pred[1:5])
+        confidence = float(pred[5])
+        # Convert normalized coordinates to pixel coordinates
+        x_center = int(x * image_width)
+        y_center = int(y * image_height)
+        w = int(w * image_width)
+        h = int(h * image_height)
+        x = x_center - w / 2
+        y = y_center - h / 2
+
+        #label = f'{classes[class_idx]}: {confidence:.2f}'
+        label = f'{classes[class_idx]}: {confidence}'
+        #label = str(class_idx)
+        color = colors[class_idx]
+
+        # Draw bounding box
+        rect = Rectangle((x, y), w, h, linewidth=2, edgecolor=color, facecolor='none', label=label)
+        plt.gca().add_patch(rect)
+        #plt.text(x, y, label, color=color, backgroundcolor='none', fontsize=8, verticalalignment='top')
+        plt.text(x, y + 2, label, color=color, backgroundcolor='white', fontsize=8, verticalalignment='bottom')
+
+    # Add legend
+    # plt.legend(loc='upper right')
+    # plt.show
+
+    # Save the image with bounding boxes
+    plt.savefig(output_path)
+    plt.show()
+    plt.close()
+
+def yolo_to_tlbr(yolo_bbox, image_width, image_height):
+    """
+    Convert YOLO format bounding box to (top, left, bottom, right) format.
+
+    Parameters:
+    - yolo_bbox (list or tuple): YOLO format bounding box [center_x, center_y, width, height].
+    - image_width (int): Width of the image.
+    - image_height (int): Height of the image.
+
+    Returns:
+    - list: (top, left, bottom, right) format bounding box.
+    """
+    center_x, center_y, width, height = yolo_bbox
+
+    # Calculate the top-left and bottom-right coordinates
+    x_min = int((center_x - width / 2) * image_width)
+    y_min = int((center_y - height / 2) * image_height)
+    x_max = int((center_x + width / 2) * image_width)
+    y_max = int((center_y + height / 2) * image_height)
+
+    return [y_min, x_min, y_max, x_max]
+
+def calculate_iou(bbox1, bbox2):
+    """
+    Calculate Intersection over Union (IoU) between two bounding boxes.
+
+    Parameters:
+    - bbox1 (list or tuple): Bounding box in the format (top, left, bottom, right).
+    - bbox2 (list or tuple): Bounding box in the format (top, left, bottom, right).
+
+    Returns:
+    - float: Intersection over Union (IoU) score.
+    """
+    # Calculate the intersection coordinates
+    x_min = max(bbox1[1], bbox2[1])
+    y_min = max(bbox1[0], bbox2[0])
+    x_max = min(bbox1[3], bbox2[3])
+    y_max = min(bbox1[2], bbox2[2])
+
+    # Calculate the area of intersection
+    intersection_area = max(0, x_max - x_min + 1) * max(0, y_max - y_min + 1)
+
+    # Calculate the area of both bounding boxes
+    area_bbox1 = (bbox1[2] - bbox1[0] + 1) * (bbox1[3] - bbox1[1] + 1)
+    area_bbox2 = (bbox2[2] - bbox2[0] + 1) * (bbox2[3] - bbox2[1] + 1)
+
+    # Calculate the union area
+    union_area = area_bbox1 + area_bbox2 - intersection_area
+
+    # Calculate IoU
+    iou = intersection_area / union_area
+
+    return iou
+
+def calculate_iou_matrix(bboxes1, bboxes2):
+    """
+    Calculate IoU matrix between two sets of bounding boxes.
+
+    Parameters:
+    - bboxes1 (numpy array): Array of bounding boxes in tlbr format for the first set.
+    - bboxes2 (numpy array): Array of bounding boxes in tlbr format for the second set.
+
+    Returns:
+    - numpy array: IoU matrix between each pair of bounding boxes.
+    """
+    iou_matrix = np.zeros((bboxes1.shape[0], bboxes2.shape[0]))
+
+    for i in range(bboxes1.shape[0]):
+        for j in range(bboxes2.shape[0]):
+            iou_matrix[i, j] = calculate_iou(bboxes1[i], bboxes2[j])
+
+    return iou_matrix
 
 
 def save_one_txt(predn, save_conf, shape, file):
@@ -171,6 +369,7 @@ def run(
                               f'classes). Pass correct combination of --weights and --data that are trained together.'
         model.warmup(imgsz=(1 if pt else batch_size, 3, imgsz, imgsz))  # warmup
         pad, rect = (0.0, False) if task == 'speed' else (0.5, pt)  # square inference for benchmarks
+        rect = False
         task = task if task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
         dataloader = create_dataloader(data[task],
                                        imgsz,
@@ -185,6 +384,14 @@ def run(
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
     names = model.names if hasattr(model, 'names') else model.module.names  # get class names
+    ##################### CV #################################################################
+    # classes = [2, 7]
+    # labels = {}
+    # for i in classes:
+    #     labels[i] = names[i]
+    # names= labels
+    #########################################################################################
+
     if isinstance(names, (list, tuple)):  # old format
         names = dict(enumerate(names))
     class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
@@ -195,6 +402,9 @@ def run(
     jdict, stats, ap, ap_class = [], [], [], []
     callbacks.run('on_val_start')
     pbar = tqdm(dataloader, desc=s, bar_format=TQDM_BAR_FORMAT)  # progress bar
+
+    predn_with_track = []
+
     for batch_i, (im, targets, paths, shapes) in enumerate(pbar):
         callbacks.run('on_val_batch_start')
         with dt[0]:
@@ -216,6 +426,9 @@ def run(
         # NMS
         targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)  # to pixels
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
+
+        
+
         with dt[2]:
             preds = non_max_suppression(preds,
                                         conf_thres,
@@ -224,6 +437,271 @@ def run(
                                         multi_label=True,
                                         agnostic=single_cls,
                                         max_det=max_det)
+            
+
+            
+            for b, pred in enumerate(preds):
+                # gg = False
+                # path = Path(paths[b])
+                # frame_id = int(path.stem)
+                # if frame_id ==73:
+                #     print("HHHHHHHHHHHHHHHHHHHHHHHHHH")
+                #     gg = True
+                mask_nms = nms_all_classes(pred[:,0:4], pred[:,4:5], iou_threshold=0.8)
+                preds[b] = pred[mask_nms]
+
+            
+            ############################### Tracking ########################################
+
+
+            
+            for si, pred in enumerate(preds):
+                detections = []
+                
+                path, shape = Path(paths[si]), shapes[si][0]
+                frame_id = int(path.stem)
+                # if frame_id ==73:
+                #     print("HHHHHHHHHHHHHHHHHHHHHHHHHH")
+                predn = pred.clone()
+                scale_boxes(im[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
+                predn = predn.cpu()
+                x1, y1, x2, y2, score, cls = predn[:, 0], predn[:, 1], predn[:, 2], predn[:, 3], predn[:, 4], predn[:, 5]
+                cls = [model.names[int(idx)] for idx in cls]
+                for i in range(predn.shape[0]):
+                    detections.append(([x1[i], y1[i], int(x2[i]-x1[i]), int(y2[i]-y1[i])], score[i], cls[i]))
+                image = cv2.imread(path.as_posix())
+                # Convert the image from BGR to RGB (if needed)
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                tracks = object_tracker.update_tracks(detections, frame=image) # bbs expected to be a list of detections, each in tuples of ( [left,top,w,h], confidence, detection_class )    
+                track_id = []
+                bbox_track = []
+                track_score = []
+                for track in tracks:
+                    if not track.is_confirmed() or (track.det_conf is None):
+                        continue
+                    track_id.append(track.track_id)
+                    track_score.append(track.det_conf)
+                    # if track.det_conf is None:
+                    #     print("HHHHHHHHHHHHHHHHHHHHHHHHHH")
+                    #     print(track.to_ltrb(orig = True, orig_strict=False))
+                    bbox_track.append(track.to_ltrb(orig = True, orig_strict=False))
+
+                track_score = np.array(track_score)
+                track_id = np.array(track_id)
+                bbox_track = np.array(bbox_track)
+                yolo_bbox = np.stack([x1, y1, x2, y2], axis=1)
+                track_ids = np.ones((yolo_bbox.shape[0],1)) * -1
+                # iou = calculate_iou_matrix(yolo_bbox, bbox_track)
+                # if iou.shape[0]!=0 and iou.shape[1]!=0:
+                #     yolo_with_track = np.argmax(iou, axis=1)
+                #     tracks_with_yolo = np.argmax(iou, axis=0)
+                #     # Create a mask to ensure uniqueness
+                #     mask = np.zeros_like(yolo_with_track, dtype=bool)
+                #     for i, track_idx in enumerate(tracks_with_yolo):
+                #         if yolo_with_track[track_idx] == i:
+                #             mask[track_idx] = True
+
+                #     iou_potential_track = np.max(iou, axis=1) >=0.9
+                #     track_id = track_id[yolo_with_track].reshape(-1,1)
+                #     track_ids[iou_potential_track* mask] = track_id[iou_potential_track * mask] 
+                if bbox_track.shape[0] != 0:
+                    for i, score in enumerate(predn[:, 4]):
+                        # Find indices where track_score is equal to the current score
+                        indices = np.where(track_score == score.numpy())[0]
+
+                        # Check if there is exactly one matching element
+                        if len(indices) == 1:
+                            track_ids[i] = track_id[indices[0]]
+                
+
+                # Check if there are at least two non -1 elements that are the same
+                # A =(track_ids[track_ids != -1]).shape[0]
+                # B = (np.unique(track_ids[track_ids != -1])).shape[0]
+                # if (track_ids[track_ids != -1]).shape[0] != (np.unique(track_ids[track_ids != -1])).shape[0]:
+                #     print("hi")
+
+
+                # count_zeros = np.count_nonzero(track_ids == 0)
+                # if count_zeros >1:
+                #     print("HHHHHHHHHHHHHHHHHHHHHHHHHHHHH")
+                # predn_with_track.append(np.stack([predn.numpy(), track_ids], axis=1))
+                # if batch_i ==13:
+                #     print("HHHHHHHHHHHHHHHHh")
+                predn_with_track.append(np.hstack((predn.numpy(), track_ids)))
+
+                neighbor_frame = {}
+                matched_track_ind = {}
+                neighbor_cls = {}
+                max_neighbors = 10
+                if si>=max_neighbors or batch_i>0:
+                    
+                    index = batch_i*batch_size + si
+                    current_frame = predn_with_track[index]
+                    for i in range(1,max_neighbors+1):
+                        frame_ind = f'current_frame_minus_{i}'
+                        matched_track_name = f'current_ind_minus_{i}'
+                        matched_cls_name = f'current_cls_minus_{i}'
+                        matched_track_ind[matched_track_name] = []
+                        neighbor_cls[matched_cls_name] = []
+                        neighbor_frame[frame_ind] = predn_with_track[index-i]
+                    # current_frame_minus_1 = predn_with_track[index-1]
+                    # current_frame_minus_2 = predn_with_track[index-2]
+                    # current_frame_minus_3 = predn_with_track[index-3]
+                    # current_frame_minus_4 = predn_with_track[index-4]
+                    # current_frame_minus_5 = predn_with_track[index-5]
+                    # current_frame_minus_6 = predn_with_track[index-6]
+                    # current_frame_minus_7 = predn_with_track[index-7]
+                    # current_frame_minus_8 = predn_with_track[index-8]
+                    # current_frame_minus_9 = predn_with_track[index-9]
+                    # current_frame_minus_10 = predn_with_track[index-10]
+
+                    
+
+                    for k in range(current_frame.shape[0]):
+                        if current_frame[k,-1]!=-1:
+                            id = current_frame[k,-1]
+                            current_score  = current_frame[k,-3]
+                            cls_current = current_frame[k,-2]
+                            for i in range(1,max_neighbors+1):
+                                frame_ind_name = f'current_frame_minus_{i}'
+                                matched_track_name = f'current_ind_minus_{i}'
+                                matched_cls_name = f'current_cls_minus_{i}'
+                                matched_track_ind[matched_track_name] = neighbor_frame[frame_ind_name][:, -1] == current_frame[k,-1]
+                                neighbor_cls[matched_cls_name] = neighbor_frame[frame_ind_name][matched_track_ind[matched_track_name], -2]
+
+
+                            # current_ind_minus_1 = current_frame_minus_1[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_1 = current_frame_minus_1[current_ind_minus_1,-2]
+                            # current_ind_minus_2 = current_frame_minus_2[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_2 = current_frame_minus_2[current_ind_minus_2,-2]
+                            # current_ind_minus_3 = current_frame_minus_3[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_3 = current_frame_minus_3[current_ind_minus_3,-2]
+                            # current_ind_minus_4 = current_frame_minus_4[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_4 = current_frame_minus_4[current_ind_minus_4,-2]
+                            # current_ind_minus_5 = current_frame_minus_5[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_5 = current_frame_minus_5[current_ind_minus_5,-2]
+                            # current_ind_minus_6 = current_frame_minus_6[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_6 = current_frame_minus_6[current_ind_minus_6,-2]
+                            # current_ind_minus_7 = current_frame_minus_7[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_7 = current_frame_minus_7[current_ind_minus_7,-2]
+                            # current_ind_minus_8 = current_frame_minus_8[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_8 = current_frame_minus_8[current_ind_minus_8,-2]
+                            # current_ind_minus_9 = current_frame_minus_9[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_9 = current_frame_minus_9[current_ind_minus_9,-2]
+                            # current_ind_minus_10 = current_frame_minus_10[:,-1]== current_frame[k,-1]
+                            # cls_current_minus_10 = current_frame_minus_10[current_ind_minus_10,-2]
+                            # past_ind = past_frame[:,-1] == current_frame[k,-1]
+                            # cls_past = past_frame[past_ind,-2]
+                            # score_previous = previous_frame[previous_frame[:,-1] == current_frame[k,-1],-3]
+                            # score_past = past_frame[past_frame[:,-1]== current_frame[k,-1],-3]
+                            # classes= np.hstack((cls_current_minus_1, cls_current_minus_2, cls_current_minus_3, cls_current_minus_4, cls_current_minus_5,
+                            #                     cls_current_minus_6, cls_current_minus_7, cls_current_minus_8, cls_current_minus_9, cls_current_minus_10))
+                            classes = []
+                            
+                            for i in range(1,max_neighbors+1):
+                                matched_cls_name = f'current_cls_minus_{i}'
+                                classes.append(neighbor_cls[matched_cls_name])
+                            
+                            classes = np.array([arr[0] for arr in classes if arr.shape[0] > 0])
+
+                            # classes = np.hstack([arr for arr in classes if arr.shape[0] > 0])
+                        
+
+                            # classes= np.hstack((cls_current_minus_1, cls_current_minus_2, cls_current_minus_3, cls_current_minus_4, cls_current_minus_5))
+                            # classes = np.array([cls_current_minus_one[0], cls_current_minus_two[0], cls_current_minus_three[0], cls_current_minus_four[0], cls_current_minus_five[0]])
+                            neighbors = 6
+                            score_thresh = 0.8
+                            unique_elements, counts = np.unique(classes[-1-neighbors:-1], return_counts=True)
+                            # Find the element with the maximum count
+                            if counts.shape[0] != 0 :
+                                estimated_classs = unique_elements[np.argmax(counts)]
+                            else:
+                                estimated_classs = -1
+                            # if cls_previous.size != 0 and cls_past.size !=0:
+                            #     classes = np.array([cls_current, cls_previous[0], cls_past[0]])
+                            # neighbors = 5
+                            # score_thresh = 0.8
+                            if estimated_classs != -1:
+                                if estimated_classs != cls_current and classes.shape[0]  >= neighbors and  max(counts) >=neighbors and  current_score <= score_thresh:
+                                    # # classes = np.array([cls_current, cls_previous[0], cls_past[0]])
+                                    # unique_elements, counts = np.unique(classes, return_counts=True)
+                                    # # Find the element with the maximum count
+                                    # estimated_classs = unique_elements[np.argmax(counts)]
+                                    # i = 0
+                                    for i in range(neighbors+1):
+                                        if i == 0:
+                                            predn_with_track[index][k, -2] = estimated_classs
+                                        else:
+                                            # continue
+                                            current_ind = f'current_ind_minus_{i}'
+                                            predn_with_track[index - i][np.where(matched_track_ind[current_ind])[0], -2] = estimated_classs
+
+                                        
+
+
+                                    # predn_with_track[index][k, -2] = estimated_classs
+                                    # predn_with_track[index-1][np.where(current_ind_minus_1)[0], -2] = estimated_classs
+                                    # predn_with_track[index-2][np.where(current_ind_minus_2)[0], -2] = estimated_classs
+                                    # predn_with_track[index-3][np.where(current_ind_minus_3)[0], -2] = estimated_classs
+                                    # predn_with_track[index-4][np.where(current_ind_minus_4)[0], -2] = estimated_classs
+                                    # predn_with_track[index-5][np.where(current_ind_minus_5)[0], -2] = estimated_classs
+                                    
+
+                                    
+                                # if cls_previous == cls_past and cls_previous != current_frame[k,-1]:
+                                #     predn_with_track[si][k, -2] = cls_previous
+                                # elif cls_previous != cls_current or cls_past != cls_current:
+                                #     if score_previous >= score_past:
+                                #         predn_with_track[si][k, -2] = cls_previous
+                                #     else:
+                                #         predn_with_track[si][k, -2] = cls_past
+                    
+                    # cv2.rectangle(img,(int(bbox[0]), int(bbox[1])),(int(bbox[2]), int(bbox[3])),(0,0,255),2)
+                    # cv2.putText(img, "ID: " + str(track_id), (int(bbox[0]), int(bbox[1] - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+                # Example usage
+                # for j, path in enumerate(paths):
+                #     image_path = path
+                #     im_number = os.path.splitext(os.path.basename(image_path))[0]
+                #     yolo_predictions_path = '/media/hamed/Data/CV_PRJ/yolov5/runs/val/exp/labels/' + im_number + '.txt'
+                #     output_path = '/media/hamed/Data/CV_PRJ/yolov5/runs/val/exp/output/' + im_number + '.jpg' 
+
+                #     plot_image_with_bboxes(image_path, yolo_predictions_path, output_path)
+            ############################### class change ############################################################
+                                    estimated_classs = torch.tensor(estimated_classs, dtype=torch.float32).to(device='cuda').reshape(-1,1)
+                                    # # A = np.where(previous_ind)[0]
+                                    # # ind = torch.tensor(np.where(previous_ind)[0])
+                                    # i = 0
+                                    for i in range(neighbors+1):
+                                        if i == 0:
+                                            
+                                            preds[si][k, -1] = estimated_classs
+                                        else:
+                                            matched_track_name = f'current_ind_minus_{i}'
+                                            preds[si-i][np.where(matched_track_ind[matched_track_name])[0], -1] = estimated_classs
+
+                                    # preds[si][k, -1] = estimated_classs
+                                    # preds[si-1][np.where(current_ind_minus_1)[0], -1] = estimated_classs
+                                    # preds[si-2][np.where(current_ind_minus_2)[0], -1] = estimated_classs
+                                    # preds[si-3][np.where(current_ind_minus_3)[0], -1] = estimated_classs
+                                    # preds[si-4][np.where(current_ind_minus_4)[0], -1] = estimated_classs
+                                    # preds[si-5][np.where(current_ind_minus_5)[0], -1] = estimated_classs
+                    # if si >=5:
+                    #     preds[si][:, -2] = torch.from_numpy(predn_with_track[index][:, -1])
+                    #     preds[si-1][:, -2] = torch.from_numpy(predn_with_track[index-1][:, -1])
+                    #     preds[si-2][:, -2] = torch.from_numpy(predn_with_track[index-2][:, -1])
+                    #     preds[si-3][:, -2] = torch.from_numpy(predn_with_track[index-3][:, -1])
+                    #     preds[si-4][:, -2] = torch.from_numpy(predn_with_track[index-4][:, -1])
+                    #     preds[si-5][:, -2] = torch.from_numpy(predn_with_track[index-5][:, -1])
+                    # elif preds[si].shape[0] != 0:
+                    #     # if(torch.from_numpy(predn_with_track[index][:, -1]).shape != preds[si][:, -2].shape):
+                    #     #     print(torch.from_numpy(predn_with_track[index][:, -1]).shape)
+                    #     #     print(preds[si][:, -2].shape)
+                    #     #     print("HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH")
+                    #     preds[si][:, -2] = torch.from_numpy(predn_with_track[index][:, -1])
+
+
+            #################################################################################
 
         # Metrics
         for si, pred in enumerate(preds):
@@ -263,9 +741,22 @@ def run(
                 save_one_json(predn, jdict, path, class_map)  # append to COCO-JSON dictionary
             callbacks.run('on_val_image_end', pred, predn, path, names, im[si])
 
+            # Tracking output
+            ######################################################################################
+            # for j, path in enumerate(paths):
+            image_path = path
+            im_number = os.path.splitext(os.path.basename(image_path))[0]
+            yolo_predictions_path = '/media/hamed/Data/CV_PRJ/yolov5/runs/val/exp/labels/' + im_number + '.txt'
+            output = '/media/hamed/Data/CV_PRJ/yolov5/runs/val/exp/output/'
+            output_path = output + im_number + '.jpg' 
+            if not os.path.exists(output):
+                os.makedirs(output)
+            plot_image_with_bboxes(image_path, yolo_predictions_path, output_path)
+            ######################################################################################
+
         # Plot images
         if plots and batch_i < 3:
-            plot_images(im, targets, paths, save_dir / f'val_batch{batch_i}_labels.jpg', names)  # labels
+            # plot_images(im, targets, paths, save_dir / f'val_batch{batch_i}_labels.jpg', names)  # labels
             plot_images(im, output_to_target(preds), paths, save_dir / f'val_batch{batch_i}_pred.jpg', names)  # pred
 
         callbacks.run('on_val_batch_end', batch_i, im, targets, paths, shapes, preds)
@@ -341,11 +832,11 @@ def run(
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='dataset.yaml path')
+    parser.add_argument('--data', type=str, default=ROOT / 'data/CV.yaml', help='dataset.yaml path')
     parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5s.pt', help='model path(s)')
-    parser.add_argument('--batch-size', type=int, default=32, help='batch size')
+    parser.add_argument('--batch-size', type=int, default=128, help='batch size')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.001, help='confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.5, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.6, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=300, help='maximum detections per image')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
@@ -354,9 +845,9 @@ def parse_opt():
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
-    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    parser.add_argument('--save-txt', default=True, action='store_true', help='save results to *.txt')
     parser.add_argument('--save-hybrid', action='store_true', help='save label+prediction hybrid results to *.txt')
-    parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
+    parser.add_argument('--save-conf', default=True, action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-json', action='store_true', help='save a COCO-JSON results file')
     parser.add_argument('--project', default=ROOT / 'runs/val', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')

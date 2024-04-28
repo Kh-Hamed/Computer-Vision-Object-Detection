@@ -337,7 +337,7 @@ def plot_pr_curve(px, py, ap, save_dir=Path('pr_curve.png'), names=()):
     plt.close(fig)
 
 
-@threaded
+# @threaded
 def plot_mc_curve(px, py, save_dir=Path('mc_curve.png'), names=(), xlabel='Confidence', ylabel='Metric'):
     # Metric-confidence curve
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)

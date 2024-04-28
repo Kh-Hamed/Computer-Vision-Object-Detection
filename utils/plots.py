@@ -111,7 +111,7 @@ def output_to_target(output, max_det=300):
     return torch.cat(targets, 0).numpy()
 
 
-@threaded
+# @threaded
 def plot_images(images, targets, paths=None, fname='images.jpg', names=None):
     # Plot image grid with labels
     if isinstance(images, torch.Tensor):
